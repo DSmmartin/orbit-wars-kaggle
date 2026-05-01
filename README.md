@@ -32,18 +32,17 @@ Each turn, an agent returns moves in this format:
 
 The strategic goal is to balance expansion, defense, and attacks while timing launches against moving targets.
 
-## Repository Structure
+## Refactor Overview
 
-- `main.py`: runs a local match (`nearest_planet_sniper` vs `random`)
-- `orbit_wars/strategies/nearest_plannet_snipper.py`: current strategy logic
-- `orbit_wars/observatory/tracing.py`: observability outputs (replay overlay + traces)
-- `orbit_wars/army/ballistics.py`: trajectory/aiming helpers
+The strategy is split into clear layers:
 
-Generated artifacts:
-
-- `replay.html`: visual replay
-- `observations.json`: full step-by-step data
-- `actions.json`: condensed action log
+- `orbit_wars/state`: observation adapters and normalized game state
+- `orbit_wars/agents/nearest_planet_sniper`: policy and action-builder logic
+- `orbit_wars/fleets`: enemy fleet prediction utilities
+- `orbit_wars/astronomy`: planet/comet trajectory forecast support
+- `orbit_wars/army`: low-level ballistics and physics helpers
+- `orbit_wars/strategies`: Kaggle-compatible wrapper entrypoints
+- `orbit_wars/observatory`: app/timing logging utilities
 
 ## Run The Project
 
@@ -61,12 +60,10 @@ Notes:
 
 ## Outputs
 
-After execution, you get:
+After execution, logs are written to `outputs/logs`:
 
-- `replay.html`
-- `observations.json`
-- `actions.json`
-- `action_table.json`
+- `app.log`
+- `timing.log`
 
 Console output includes per-player final `reward` and `status`.
 

@@ -13,10 +13,13 @@ from orbit_wars.army.ballistics_evaluator import ShotEvaluation, evaluate_shot
 from orbit_wars.army.ballistics_rotating import solve_rotating_planet_intercept
 from orbit_wars.army.ballistics_static import solve_static_planet_intercept
 from orbit_wars.army.physics import fleet_speed, is_rotating, planet_position_at_step
+from orbit_wars.observatory import timed_calc
 
 
 @dataclass(slots=True)
 class ShotPlan:
+    """Planned shot metadata including validity/evaluation details."""
+
     angle: float
     scenario: str
     valid: bool
@@ -26,6 +29,7 @@ class ShotPlan:
 
 
 def _as_initial_by_id(initial_planets: Sequence[Planet] | Mapping[int, Planet] | None) -> dict[int, Planet]:
+    """Normalize `initial_planets` into an id-indexed dictionary."""
     if initial_planets is None:
         return {}
     if isinstance(initial_planets, Mapping):
@@ -34,6 +38,7 @@ def _as_initial_by_id(initial_planets: Sequence[Planet] | Mapping[int, Planet] |
 
 
 def _is_comet_target(to_planet: Planet, comet_planet_ids: Sequence[int] | None) -> bool:
+    """Return whether the target planet id corresponds to an active comet body."""
     return bool(comet_planet_ids) and to_planet.id in comet_planet_ids
 
 
@@ -42,6 +47,7 @@ def classify_scenario(
     *,
     comet_planet_ids: Sequence[int] | None,
 ) -> str:
+    """Classify the target as static, rotating planet, or comet scenario."""
     if _is_comet_target(to_planet, comet_planet_ids):
         return "comet"
     if is_rotating(to_planet):
@@ -67,74 +73,86 @@ def plan_shot(
     evaluation_horizon: int = 220,
 ) -> ShotPlan:
     """Create a scenario-specific shot plan and evaluate its validity."""
-    scenario = classify_scenario(to_planet, comet_planet_ids=comet_planet_ids)
-    eta_steps: float | None = None
+    with timed_calc(
+        "ballistics.plan_shot",
+        source=from_planet.id,
+        target=to_planet.id,
+        ships=ships,
+        step=current_step,
+    ):
+        scenario = classify_scenario(to_planet, comet_planet_ids=comet_planet_ids)
+        eta_steps: float | None = None
 
-    if scenario == "static_planet":
-        angle, eta_steps = solve_static_planet_intercept(
-            from_planet,
-            to_planet,
-            ships,
-            max_speed=max_speed,
-        )
-    elif scenario == "moving_planet":
-        angle, eta_steps = solve_rotating_planet_intercept(
-            from_planet,
-            to_planet,
-            ships,
-            current_step,
-            angular_velocity,
-            initial_to_planet=initial_to_planet or to_planet,
-            max_speed=max_speed,
-            max_iterations=max_iterations,
-            step_tolerance=step_tolerance,
-        )
-    else:
-        angle, eta_steps, reason = solve_comet_intercept(
-            from_planet,
-            to_planet,
-            ships,
-            comets=list(comets) if comets is not None else None,
-            max_speed=max_speed,
-        )
-        if angle is None:
+        if scenario == "static_planet":
+            angle, eta_steps = solve_static_planet_intercept(
+                from_planet,
+                to_planet,
+                ships,
+                max_speed=max_speed,
+            )
+        elif scenario == "moving_planet":
+            angle, eta_steps = solve_rotating_planet_intercept(
+                from_planet,
+                to_planet,
+                ships,
+                current_step,
+                angular_velocity,
+                initial_to_planet=initial_to_planet or to_planet,
+                max_speed=max_speed,
+                max_iterations=max_iterations,
+                step_tolerance=step_tolerance,
+            )
+        else:
+            angle, eta_steps, reason = solve_comet_intercept(
+                from_planet,
+                to_planet,
+                ships,
+                comets=list(comets) if comets is not None else None,
+                max_speed=max_speed,
+            )
+            if angle is None:
+                return ShotPlan(
+                    angle=math.atan2(to_planet.y - from_planet.y, to_planet.x - from_planet.x),
+                    scenario=scenario,
+                    valid=False,
+                    eta_steps=eta_steps,
+                    reason=reason or "comet_solver_failed",
+                )
+
+        # When no world-state was provided, we can only return the raw solver result.
+        if planets is None:
             return ShotPlan(
-                angle=math.atan2(to_planet.y - from_planet.y, to_planet.x - from_planet.x),
+                angle=angle,
                 scenario=scenario,
-                valid=False,
+                valid=True,
                 eta_steps=eta_steps,
-                reason=reason or "comet_solver_failed",
             )
 
-    # When no world-state was provided, we can only return the raw solver result.
-    if planets is None:
-        return ShotPlan(angle=angle, scenario=scenario, valid=True, eta_steps=eta_steps)
+        initial_by_id = _as_initial_by_id(initial_planets)
+        if not initial_by_id and initial_to_planet is not None:
+            initial_by_id[to_planet.id] = initial_to_planet
 
-    initial_by_id = _as_initial_by_id(initial_planets)
-    if not initial_by_id and initial_to_planet is not None:
-        initial_by_id[to_planet.id] = initial_to_planet
-
-    evaluation = evaluate_shot(
-        from_planet=from_planet,
-        target_id=to_planet.id,
-        angle=angle,
-        ships=ships,
-        current_step=current_step,
-        angular_velocity=angular_velocity,
-        planets=planets,
-        initial_by_id=initial_by_id,
-        comets=comets,
-        max_speed=max_speed,
-        max_steps=evaluation_horizon,
-    )
-    return ShotPlan(
-        angle=angle,
-        scenario=scenario,
-        valid=evaluation.valid,
-        eta_steps=eta_steps,
-        reason=evaluation.reason,
-        evaluation=evaluation,
-    )
+        evaluation = evaluate_shot(
+            from_planet=from_planet,
+            target_id=to_planet.id,
+            angle=angle,
+            ships=ships,
+            current_step=current_step,
+            angular_velocity=angular_velocity,
+            planets=planets,
+            initial_by_id=initial_by_id,
+            comets=comets,
+            max_speed=max_speed,
+            max_steps=evaluation_horizon,
+        )
+        return ShotPlan(
+            angle=angle,
+            scenario=scenario,
+            valid=evaluation.valid,
+            eta_steps=eta_steps,
+            reason=evaluation.reason,
+            evaluation=evaluation,
+        )
 
 
 def aim_angle(
