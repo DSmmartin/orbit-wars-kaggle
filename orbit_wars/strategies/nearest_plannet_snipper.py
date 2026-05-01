@@ -1,6 +1,9 @@
 import math
+
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
-from orbit_wars.army.ballistics import aim_angle
+
+from orbit_wars.army.ballistics import plan_shot
+from orbit_wars.observatory import record_decision
 
 
 def nearest_planet_sniper(obs):
@@ -12,10 +15,12 @@ def nearest_planet_sniper(obs):
     raw_initial = obs.get("initial_planets", []) if isinstance(obs, dict) else obs.initial_planets
     initial_by_id = {p[0]: Planet(*p) for p in raw_initial}
 
+    raw_comets = obs.get("comets", []) if isinstance(obs, dict) else obs.comets
+    comet_planet_ids = obs.get("comet_planet_ids", []) if isinstance(obs, dict) else obs.comet_planet_ids
+
     angular_velocity = obs.get("angular_velocity", 0.0) if isinstance(obs, dict) else obs.angular_velocity
     current_step = obs.get("step", 0) if isinstance(obs, dict) else obs.step
 
-    # Separate our planets from targets
     my_planets = [p for p in planets if p.owner == player]
     targets = [p for p in planets if p.owner != player]
 
@@ -23,21 +28,41 @@ def nearest_planet_sniper(obs):
         return moves
 
     for mine in my_planets:
-        # Find the nearest planet we don't own
-        nearest = min(targets, key=lambda t: math.sqrt((mine.x - t.x) ** 2 + (mine.y - t.y) ** 2))
+        ordered_targets = sorted(
+            targets,
+            key=lambda t: math.hypot(mine.x - t.x, mine.y - t.y),
+        )
 
-        # How many ships do we need? Target's garrison + 1
-        ships_needed = max(nearest.ships + 1, 20)
+        for target in ordered_targets:
+            ships_needed = max(target.ships + 1, 20)
+            if mine.ships < ships_needed:
+                continue
 
-        # Only send if we have enough
-        if mine.ships >= ships_needed:
-            angle = aim_angle(
-                mine, nearest,
+            shot = plan_shot(
+                mine,
+                target,
                 ships=ships_needed,
                 current_step=current_step,
                 angular_velocity=angular_velocity,
-                initial_to_planet=initial_by_id.get(nearest.id),
+                initial_to_planet=initial_by_id.get(target.id),
+                planets=planets,
+                initial_planets=initial_by_id,
+                comets=raw_comets,
+                comet_planet_ids=comet_planet_ids,
             )
-            moves.append([mine.id, angle, ships_needed])
+
+            if not shot.valid:
+                continue
+
+            moves.append([mine.id, shot.angle, ships_needed])
+            record_decision(
+                step=current_step,
+                player=player,
+                source_planet_id=mine.id,
+                target_planet_id=target.id,
+                angle_rad=shot.angle,
+                ships=ships_needed,
+            )
+            break
 
     return moves

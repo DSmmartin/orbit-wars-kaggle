@@ -1,89 +1,141 @@
-"""
-Ballistics utilities for Orbit Wars.
+"""Ballistics utilities for Orbit Wars with scenario-based solvers."""
 
-Fleets travel in **straight lines** at constant speed — no gravity, no curves.
-
-Speed formula (from the environment source):
-    speed = 1.0 + (max_speed - 1.0) * (log(ships) / log(1000)) ** 1.5
-    speed = min(speed, max_speed)          # default max_speed = 6.0
-
-Planet rotation (only planets where orbital_radius + radius < 50):
-    position(step) = (50 + r*cos(initial_angle + ω*step),
-                      50 + r*sin(initial_angle + ω*step))
-    where  r            = orbital radius from initial_planets
-           initial_angle = atan2 of initial planet relative to sun centre
-           ω             = obs.angular_velocity  (rad/step, same for all planets)
-
-For static planets aim_angle() returns a direct atan2 shot.
-For rotating planets it iterates to find the future intercept position.
-
-Key implementation notes:
-- Float steps are used throughout iteration (no round()) to avoid quantisation
-  oscillation between adjacent integers.
-- The fleet spawns planet_radius + 0.1 ahead of the planet centre, so the
-  actual travel distance is center-to-target minus that offset.
-- planet_position_at_step() accepts float steps for smooth convergence.
-"""
+from __future__ import annotations
 
 import math
+from dataclasses import dataclass
+from typing import Any, Mapping, Sequence
 
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
 
-# Mirror the constants used by the environment
-CENTER = 50.0
-ROTATION_RADIUS_LIMIT = 50.0  # orbital_radius + planet_radius must be < this to rotate
+from orbit_wars.army.ballistics_comet import solve_comet_intercept
+from orbit_wars.army.ballistics_evaluator import ShotEvaluation, evaluate_shot
+from orbit_wars.army.ballistics_rotating import solve_rotating_planet_intercept
+from orbit_wars.army.ballistics_static import solve_static_planet_intercept
+from orbit_wars.army.physics import fleet_speed, is_rotating, planet_position_at_step
 
 
-# ---------------------------------------------------------------------------
-# Primitive helpers
-# ---------------------------------------------------------------------------
-
-def fleet_speed(ships: int, max_speed: float = 6.0) -> float:
-    """Return the travel speed (units/step) for a fleet of *ships* ships."""
-    if ships <= 1:
-        return 1.0
-    speed = 1.0 + (max_speed - 1.0) * (math.log(ships) / math.log(1000)) ** 1.5
-    return min(speed, max_speed)
+@dataclass(slots=True)
+class ShotPlan:
+    angle: float
+    scenario: str
+    valid: bool
+    eta_steps: float | None = None
+    reason: str | None = None
+    evaluation: ShotEvaluation | None = None
 
 
-def is_rotating(planet: Planet) -> bool:
-    """Return True if *planet* orbits the sun and therefore moves each step."""
-    orbital_radius = math.sqrt((planet.x - CENTER) ** 2 + (planet.y - CENTER) ** 2)
-    return orbital_radius + planet.radius < ROTATION_RADIUS_LIMIT
+def _as_initial_by_id(initial_planets: Sequence[Planet] | Mapping[int, Planet] | None) -> dict[int, Planet]:
+    if initial_planets is None:
+        return {}
+    if isinstance(initial_planets, Mapping):
+        return dict(initial_planets)
+    return {p.id: p for p in initial_planets}
 
 
-def planet_position_at_step(
-    initial_planet: Planet,
-    step: float,
+def _is_comet_target(to_planet: Planet, comet_planet_ids: Sequence[int] | None) -> bool:
+    return bool(comet_planet_ids) and to_planet.id in comet_planet_ids
+
+
+def classify_scenario(
+    to_planet: Planet,
+    *,
+    comet_planet_ids: Sequence[int] | None,
+) -> str:
+    if _is_comet_target(to_planet, comet_planet_ids):
+        return "comet"
+    if is_rotating(to_planet):
+        return "moving_planet"
+    return "static_planet"
+
+
+def plan_shot(
+    from_planet: Planet,
+    to_planet: Planet,
+    ships: int,
+    current_step: int,
     angular_velocity: float,
-) -> tuple[float, float]:
-    """
-    Return the (x, y) position of a planet at absolute game *step*.
+    *,
+    initial_to_planet: Planet | None = None,
+    planets: Sequence[Planet] | None = None,
+    initial_planets: Sequence[Planet] | Mapping[int, Planet] | None = None,
+    comets: Sequence[Any] | None = None,
+    comet_planet_ids: Sequence[int] | None = None,
+    max_speed: float = 6.0,
+    max_iterations: int = 100,
+    step_tolerance: float = 0.05,
+    evaluation_horizon: int = 220,
+) -> ShotPlan:
+    """Create a scenario-specific shot plan and evaluate its validity."""
+    scenario = classify_scenario(to_planet, comet_planet_ids=comet_planet_ids)
+    eta_steps: float | None = None
 
-    Uses *initial_planet* to derive orbital radius and initial angle — the same
-    formula the environment applies (orbit_wars.py lines 563-570).
-    Accepts a float step for smooth interpolation during ballistic iteration.
-    For static planets the position is constant and equals initial_planet.(x, y).
-    """
-    dx = initial_planet.x - CENTER
-    dy = initial_planet.y - CENTER
-    orbital_radius = math.sqrt(dx ** 2 + dy ** 2)
+    if scenario == "static_planet":
+        angle, eta_steps = solve_static_planet_intercept(
+            from_planet,
+            to_planet,
+            ships,
+            max_speed=max_speed,
+        )
+    elif scenario == "moving_planet":
+        angle, eta_steps = solve_rotating_planet_intercept(
+            from_planet,
+            to_planet,
+            ships,
+            current_step,
+            angular_velocity,
+            initial_to_planet=initial_to_planet or to_planet,
+            max_speed=max_speed,
+            max_iterations=max_iterations,
+            step_tolerance=step_tolerance,
+        )
+    else:
+        angle, eta_steps, reason = solve_comet_intercept(
+            from_planet,
+            to_planet,
+            ships,
+            comets=list(comets) if comets is not None else None,
+            max_speed=max_speed,
+        )
+        if angle is None:
+            return ShotPlan(
+                angle=math.atan2(to_planet.y - from_planet.y, to_planet.x - from_planet.x),
+                scenario=scenario,
+                valid=False,
+                eta_steps=eta_steps,
+                reason=reason or "comet_solver_failed",
+            )
 
-    if orbital_radius + initial_planet.radius >= ROTATION_RADIUS_LIMIT:
-        # Static planet — never moves
-        return initial_planet.x, initial_planet.y
+    # When no world-state was provided, we can only return the raw solver result.
+    if planets is None:
+        return ShotPlan(angle=angle, scenario=scenario, valid=True, eta_steps=eta_steps)
 
-    initial_angle = math.atan2(dy, dx)
-    angle = initial_angle + angular_velocity * step
-    return (
-        CENTER + orbital_radius * math.cos(angle),
-        CENTER + orbital_radius * math.sin(angle),
+    initial_by_id = _as_initial_by_id(initial_planets)
+    if not initial_by_id and initial_to_planet is not None:
+        initial_by_id[to_planet.id] = initial_to_planet
+
+    evaluation = evaluate_shot(
+        from_planet=from_planet,
+        target_id=to_planet.id,
+        angle=angle,
+        ships=ships,
+        current_step=current_step,
+        angular_velocity=angular_velocity,
+        planets=planets,
+        initial_by_id=initial_by_id,
+        comets=comets,
+        max_speed=max_speed,
+        max_steps=evaluation_horizon,
+    )
+    return ShotPlan(
+        angle=angle,
+        scenario=scenario,
+        valid=evaluation.valid,
+        eta_steps=eta_steps,
+        reason=evaluation.reason,
+        evaluation=evaluation,
     )
 
-
-# ---------------------------------------------------------------------------
-# Main ballistics solver
-# ---------------------------------------------------------------------------
 
 def aim_angle(
     from_planet: Planet,
@@ -96,74 +148,32 @@ def aim_angle(
     max_speed: float = 6.0,
     max_iterations: int = 100,
     step_tolerance: float = 0.05,
+    comets: Sequence[Any] | None = None,
+    comet_planet_ids: Sequence[int] | None = None,
 ) -> float:
     """
-    Return the launch angle (radians) needed to intercept *to_planet*.
+    Backward-compatible angle API.
 
-    The angle can be passed directly as the second element of an action:
-        action = [[from_planet.id, angle, ships]]
-
-    Parameters
-    ----------
-    from_planet       : Source planet at the current step (from obs.planets).
-    to_planet         : Target planet at the current step (from obs.planets).
-    ships             : Fleet size (determines travel speed).
-    current_step      : Current game step (obs.step).
-    angular_velocity  : Shared angular velocity in rad/step (obs.angular_velocity).
-    initial_to_planet : Initial position of the target from obs.initial_planets.
-                        Required for accurate rotating-planet intercepts.
-                        Falls back to *to_planet* when omitted (less accurate).
-    max_speed         : Maximum fleet speed (configuration.shipSpeed, default 6.0).
-    max_iterations    : Iteration cap for the rotating-planet solver.
-    step_tolerance    : Convergence threshold in steps (default 0.05 steps).
-
-    Returns
-    -------
-    float
-        Launch angle in radians.  0 = right (+x), π/2 = down (+y) in board coords.
+    This returns only the launch angle. Use `plan_shot` when you need scenario
+    classification and invalid-target checks.
     """
-    speed = fleet_speed(ships, max_speed)
-    fx, fy = from_planet.x, from_planet.y
+    plan = plan_shot(
+        from_planet,
+        to_planet,
+        ships,
+        current_step,
+        angular_velocity,
+        initial_to_planet=initial_to_planet,
+        planets=None,
+        initial_planets=None,
+        comets=comets,
+        comet_planet_ids=comet_planet_ids,
+        max_speed=max_speed,
+        max_iterations=max_iterations,
+        step_tolerance=step_tolerance,
+    )
+    return plan.angle
 
-    if initial_to_planet is None:
-        initial_to_planet = to_planet
-
-    # --- Static target: direct shot ---
-    if not is_rotating(to_planet):
-        return math.atan2(to_planet.y - fy, to_planet.x - fx)
-
-    # --- Rotating target: iterative intercept ---
-    #
-    # The fleet spawns at planet_center + (planet_radius + 0.1) * direction,
-    # so the actual travel distance is center-to-target minus that offset.
-    # Using round() on t_est quantises the arrival step and can cause the loop
-    # to oscillate between adjacent integers and never converge. We use float
-    # steps throughout; planet_position_at_step accepts floats and interpolates
-    # the rotation angle continuously.
-    #
-    launch_offset = from_planet.radius + 0.1
-
-    tx, ty = to_planet.x, to_planet.y
-    d = math.sqrt((tx - fx) ** 2 + (ty - fy) ** 2)
-    t_est = max(0.0, d - launch_offset) / speed
-
-    for _ in range(max_iterations):
-        arrival_step = current_step + t_est          # float — no rounding
-        tx, ty = planet_position_at_step(initial_to_planet, arrival_step, angular_velocity)
-
-        d_new = math.sqrt((tx - fx) ** 2 + (ty - fy) ** 2)
-        t_new = max(0.0, d_new - launch_offset) / speed
-
-        if abs(t_new - t_est) < step_tolerance:
-            break
-        t_est = t_new
-
-    return math.atan2(ty - fy, tx - fx)
-
-
-# ---------------------------------------------------------------------------
-# Convenience
-# ---------------------------------------------------------------------------
 
 def estimated_travel_steps(
     from_planet: Planet,
@@ -171,13 +181,19 @@ def estimated_travel_steps(
     ships: int,
     max_speed: float = 6.0,
 ) -> float:
-    """
-    Approximate steps for a fleet to reach *to_planet* in a straight-line shot
-    to its *current* position.  Accounts for the fleet spawn offset so the
-    estimate matches what aim_angle uses internally.
-    """
-    d = math.sqrt(
-        (from_planet.x - to_planet.x) ** 2 + (from_planet.y - to_planet.y) ** 2
-    )
+    """Approximate travel steps to the target's current position."""
+    d = math.hypot(from_planet.x - to_planet.x, from_planet.y - to_planet.y)
     launch_offset = from_planet.radius + 0.1
     return max(0.0, d - launch_offset) / fleet_speed(ships, max_speed)
+
+
+__all__ = [
+    "ShotPlan",
+    "aim_angle",
+    "plan_shot",
+    "classify_scenario",
+    "estimated_travel_steps",
+    "fleet_speed",
+    "is_rotating",
+    "planet_position_at_step",
+]

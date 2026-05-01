@@ -36,7 +36,7 @@ The strategic goal is to balance expansion, defense, and attacks while timing la
 
 - `main.py`: runs a local match (`nearest_planet_sniper` vs `random`)
 - `orbit_wars/strategies/nearest_plannet_snipper.py`: current strategy logic
-- `orbit_wars/observatory/planets.py`: planet helpers/utilities
+- `orbit_wars/observatory/tracing.py`: observability outputs (replay overlay + traces)
 - `orbit_wars/army/ballistics.py`: trajectory/aiming helpers
 
 Generated artifacts:
@@ -66,6 +66,7 @@ After execution, you get:
 - `replay.html`
 - `observations.json`
 - `actions.json`
+- `action_table.json`
 
 Console output includes per-player final `reward` and `status`.
 
