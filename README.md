@@ -30,6 +30,8 @@ Each turn, an agent returns moves in this format:
 [[from_planet_id, direction_angle, num_ships], ...]
 ```
 
+The `direction_angle` is the launch heading in radians. For the PPO agent, this is **not learned** — it is computed by `orbit_wars.army.ballistics.aim_angle`, which solves the ballistic intercept trajectory accounting for orbital movement. The policy only decides *which planet to attack*.
+
 The strategic goal is to balance expansion, defense, and attacks while timing launches against moving targets.
 
 ## Refactor Overview
@@ -79,7 +81,7 @@ save_dir: outputs/rl_checkpoints
 ### 2. Train
 
 ```bash
-uv run python orbit_wars/academy/campaign.py
+uv run python train.py
 ```
 
 Checkpoints are saved to `outputs/rl_checkpoints/<run_name>/` at the interval set by `checkpoint_every`. `ckpt_last.pt` is always overwritten with the most recent update.

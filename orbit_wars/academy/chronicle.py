@@ -32,6 +32,7 @@ class FleetState:
 class GameState:
     step: int
     player: int
+    angular_velocity: float
     planets: list[PlanetState]
     fleets: list[FleetState]
 
@@ -69,6 +70,7 @@ def parse_observation(observation: Any) -> GameState:
     return GameState(
         step=int(obs_get("step", 0)),
         player=int(obs_get("player", 0)),
+        angular_velocity=float(obs_get("angular_velocity", 0.0)),
         planets=planets,
         fleets=fleets,
     )

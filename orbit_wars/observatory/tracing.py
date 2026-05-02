@@ -383,7 +383,7 @@ def _serialize_observation(observation: Any) -> Any:
 
 def export_run_artifacts(env: Any, output_dir: str | Path = "outputs") -> Path:
     out = Path(output_dir)
-    out.mkdir(exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
 
     action_rows = _build_action_rows(env.steps)
     fleet_rows = enemy_fleets_snapshot()

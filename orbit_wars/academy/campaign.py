@@ -1,22 +1,84 @@
 """Campaign — runs the PPO training loop, collecting rollouts and forging checkpoints."""
 
-from __future__ import annotations
-
-import argparse
 import random
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
+import draccus
 import numpy as np
 import torch
 
-from .doctrine import TrainConfig, default_train_config_path, load_train_config
 from .arena import OrbitWarsEnv
 from .cartography import TurnBatch, candidate_feature_dim, global_feature_dim, self_feature_dim
 from .chronicle import PlanetState
+from .crucible import TransitionBatch, ppo_update, sample_actions
+from .doctrine import TrainConfig
 from .rivals import SelfPlayOpponent, build_opponent
 from .tactician import PlanetPolicy
-from .crucible import TransitionBatch, ppo_update, sample_actions
+
+_VALID_OPPONENTS = {"sniper", "random", "self"}
+
+
+@dataclass(slots=True)
+class _PeriodAccumulator:
+    """Collects stats between two summary prints."""
+    updates: int = 0
+    episodes: int = 0
+    episode_rewards: list = field(default_factory=list)
+    losses: list = field(default_factory=list)
+    samples: int = 0
+
+
+def _fmt_time(seconds: float) -> str:
+    s = int(seconds)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f"{h}h {m:02d}m"
+    return f"{m}m {sec:02d}s"
+
+
+def _print_summary(
+    cfg: TrainConfig,
+    update: int,
+    acc: _PeriodAccumulator,
+    period_secs: float,
+    elapsed_total: float,
+) -> None:
+    remaining_updates = cfg.ppo.total_updates - update
+    secs_per_update = elapsed_total / max(update, 1)
+    eta_secs = secs_per_update * remaining_updates
+
+    updates_per_min = acc.updates / max(period_secs / 60, 1e-6)
+    samples_per_min = acc.samples / max(period_secs / 60, 1e-6)
+
+    w = 54
+    sep = "─" * w
+    print(f"\n{'═' * w}")
+    print(
+        f" Summary  [update {update}/{cfg.ppo.total_updates}"
+        f" | elapsed {_fmt_time(elapsed_total)}"
+        f" | eta {_fmt_time(eta_secs)}]"
+    )
+    print(f"{'═' * w}")
+    print(f"  {'period':<18}: {_fmt_time(period_secs)}")
+    print(f"  {'updates':<18}: {acc.updates}")
+    print(
+        f"  {'throughput':<18}: {updates_per_min:.1f} updates/min"
+        f"  |  {samples_per_min:.0f} samples/min"
+    )
+    print(f"  {'episodes':<18}: {acc.episodes}")
+    if acc.episode_rewards:
+        r_mean = sum(acc.episode_rewards) / len(acc.episode_rewards)
+        r_min = min(acc.episode_rewards)
+        r_max = max(acc.episode_rewards)
+        print(f"  {'reward':<18}: mean {r_mean:.4f}  min {r_min:.4f}  max {r_max:.4f}")
+    else:
+        print(f"  {'reward':<18}: —  (no episodes finished)")
+    if acc.losses:
+        print(f"  {'loss':<18}: mean {sum(acc.losses) / len(acc.losses):.4f}")
+    print(f"{'═' * w}\n")
 
 
 @dataclass(slots=True)
@@ -26,16 +88,22 @@ class StepGroup:
     done: bool
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Orbit Wars PPO training campaign")
-    parser.add_argument("--config", type=str, default=str(default_train_config_path()))
-    return parser.parse_args()
-
-
 def resolve_device(name: str) -> torch.device:
-    if name == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(name)
+    if name != "auto":
+        return torch.device(name)
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def _device_label(device: torch.device) -> str:
+    if device.type == "cuda":
+        return f"cuda  ({torch.cuda.get_device_name(0)})"
+    if device.type == "mps":
+        return "mps  (Apple Silicon)"
+    return "cpu"
 
 
 def seed_everything(seed: int) -> None:
@@ -44,6 +112,29 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def _print_config_status(cfg: TrainConfig, device: torch.device, start_update: int) -> None:
+    w = 54
+    sep = "=" * w
+    print(sep)
+    print(f"{'ORBIT WARS ACADEMY — Training Campaign':^{w}}")
+    print(sep)
+    print(f"  {'run_name':<18}: {cfg.run_name}")
+    print(f"  {'device':<18}: {_device_label(device)}")
+    print(f"  {'opponent':<18}: {cfg.opponent}")
+    print(f"  {'total_updates':<18}: {cfg.ppo.total_updates}")
+    print(f"  {'start_update':<18}: {start_update}")
+    print(f"  {'num_envs':<18}: {cfg.ppo.num_envs}")
+    print(f"  {'rollout_steps':<18}: {cfg.ppo.rollout_steps}")
+    print(f"  {'lr':<18}: {cfg.ppo.lr}")
+    print(f"  {'gamma':<18}: {cfg.ppo.gamma}")
+    print(f"  {'hidden_size':<18}: {cfg.model.hidden_size}")
+    print(f"  {'save_dir':<18}: {cfg.save_dir}")
+    print(f"  {'checkpoint_every':<18}: {cfg.checkpoint_every}")
+    print(f"  {'resume':<18}: {cfg.resume}")
+    print(sep)
+    print()
 
 
 def collect_rollout(
@@ -159,6 +250,7 @@ def collect_rollout(
     )
     stats = {
         "episode_reward_mean": float(np.mean(episode_rewards)) if episode_rewards else 0.0,
+        "episode_rewards": episode_rewards,
         "episodes_finished": float(len(episode_rewards)),
         "samples": float(len(values)),
     }
@@ -247,18 +339,49 @@ def _find_planet(planets: list[PlanetState], planet_id: int) -> PlanetState | No
     return None
 
 
-def main() -> None:
-    args = parse_args()
-    cfg = load_train_config(args.config)
+def _print_resume_summary(cfg: TrainConfig, resumed_from: int) -> None:
+    ckpt_path = Path(cfg.save_dir) / cfg.run_name / "ckpt_last.pt"
+    remaining = cfg.ppo.total_updates - resumed_from
+    progress_pct = resumed_from / cfg.ppo.total_updates * 100
+    w = 54
+    print(f"{'═' * w}")
+    print(f"{'ORBIT WARS ACADEMY — Resuming Campaign':^{w}}")
+    print(f"{'═' * w}")
+    print(f"  {'checkpoint':<18}: {ckpt_path}")
+    print(f"  {'resumed from':<18}: update {resumed_from}/{cfg.ppo.total_updates}  ({progress_pct:.1f}% done)")
+    print(f"  {'remaining':<18}: {remaining} updates")
+    print(f"{'═' * w}\n")
+
+
+def _load_resume_checkpoint(
+    cfg: TrainConfig,
+    policy: PlanetPolicy,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+) -> int:
+    """Load ckpt_last.pt and return the next update index to start from."""
+    ckpt_path = Path(cfg.save_dir) / cfg.run_name / "ckpt_last.pt"
+    if not ckpt_path.exists():
+        print(f"[resume] No checkpoint found at {ckpt_path} — starting from scratch.")
+        return 1
+    ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=False)
+    policy.load_state_dict(ckpt["policy"])
+    optimizer.load_state_dict(ckpt["optimizer"])
+    resumed_from = int(ckpt["update"])
+    _print_resume_summary(cfg, resumed_from)
+    return resumed_from + 1
+
+
+@draccus.wrap()
+def main(cfg: TrainConfig) -> None:
+    if cfg.opponent not in _VALID_OPPONENTS:
+        raise ValueError(f"Unknown opponent '{cfg.opponent}'. Valid choices: {_VALID_OPPONENTS}")
+
     seed_everything(cfg.seed)
     device = resolve_device(cfg.device)
     opponent = build_opponent(cfg.opponent, cfg=cfg, device=device)
     envs = [OrbitWarsEnv(cfg, opponent, env_index=idx) for idx in range(cfg.ppo.num_envs)]
-    next_seed = cfg.seed
-    batches = []
-    for env in envs:
-        batches.append(env.reset(seed=next_seed))
-        next_seed += 1
+
     policy = PlanetPolicy(
         self_dim=self_feature_dim(),
         candidate_dim=candidate_feature_dim(),
@@ -266,11 +389,29 @@ def main() -> None:
         candidate_count=cfg.env.candidate_count,
         hidden_size=cfg.model.hidden_size,
     ).to(device)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=cfg.ppo.lr)
+
+    start_update = 1
+    if cfg.resume:
+        start_update = _load_resume_checkpoint(cfg, policy, optimizer, device)
+
     if isinstance(opponent, SelfPlayOpponent):
         opponent.sync_from(policy)
-    optimizer = torch.optim.Adam(policy.parameters(), lr=cfg.ppo.lr)
+
+    _print_config_status(cfg, device, start_update)
+
+    next_seed = cfg.seed + (start_update - 1) * cfg.ppo.num_envs
+    batches = []
+    for env in envs:
+        batches.append(env.reset(seed=next_seed))
+        next_seed += 1
+
     save_dir = Path(cfg.save_dir)
-    for update in range(1, cfg.ppo.total_updates + 1):
+    train_start = time.monotonic()
+    last_summary = train_start
+    period = _PeriodAccumulator()
+
+    for update in range(start_update, cfg.ppo.total_updates + 1):
         batch, batches, next_seed, stats = collect_rollout(envs, batches, policy, cfg, device, next_seed)
         metrics = ppo_update(
             policy,
@@ -286,12 +427,28 @@ def main() -> None:
         )
         if isinstance(opponent, SelfPlayOpponent) and update % cfg.self_play_update_interval == 0:
             opponent.sync_from(policy)
+
+        period.updates += 1
+        period.episodes += int(stats["episodes_finished"])
+        period.episode_rewards.extend(stats["episode_rewards"])
+        period.losses.append(metrics["loss"])
+        period.samples += int(stats["samples"])
+
         if update % cfg.log_every == 0:
             print(
-                f"update={update} episode_reward_mean={stats['episode_reward_mean']:.4f} "
-                f"episodes={int(stats['episodes_finished'])} samples={int(stats['samples'])} "
-                f"loss={metrics['loss']:.4f}"
+                f"update={update}/{cfg.ppo.total_updates}"
+                f"  reward={stats['episode_reward_mean']:.4f}"
+                f"  episodes={int(stats['episodes_finished'])}"
+                f"  samples={int(stats['samples'])}"
+                f"  loss={metrics['loss']:.4f}"
             )
+
+        now = time.monotonic()
+        if cfg.summary_freq > 0 and (now - last_summary) >= cfg.summary_freq * 60:
+            _print_summary(cfg, update, period, now - last_summary, now - train_start)
+            period = _PeriodAccumulator()
+            last_summary = now
+
         if update % cfg.checkpoint_every == 0 or update == cfg.ppo.total_updates:
             save_checkpoint(save_dir, cfg.run_name, update, policy, optimizer, cfg)
 

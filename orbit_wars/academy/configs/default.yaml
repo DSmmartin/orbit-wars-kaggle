@@ -5,6 +5,8 @@ save_dir: outputs/rl_checkpoints
 checkpoint_every: 50
 log_every: 1
 opponent: sniper
+resume: false
+summary_freq: 5
 self_play_update_interval: 50
 self_play_deterministic: false
 alternate_player_sides: true

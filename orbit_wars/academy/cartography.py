@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 
+from orbit_wars.army.ballistics import aim_angle
+
 from .doctrine import EnvConfig
 from .chronicle import GameState, PlanetState, parse_observation
 
@@ -176,9 +178,9 @@ def build_candidate_features(
             break
         dx = tgt.x - src.x
         dy = tgt.y - src.y
-        angle = math.atan2(dy, dx)
-        crosses_sun = shot_crosses_sun(src, angle, tgt)
         ships_needed = fixed_ship_count(src, tgt)
+        angle = aim_angle(src, tgt, ships_needed, state.step, state.angular_velocity)
+        crosses_sun = shot_crosses_sun(src, angle, tgt)
         features[idx] = np.asarray(
             [
                 1.0,
