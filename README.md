@@ -46,7 +46,7 @@ The strategy is split into clear layers:
 
 ## Run The Project
 
-From repository root:
+Install dependencies and run a quick heuristic match:
 
 ```bash
 uv sync
@@ -57,6 +57,46 @@ Notes:
 
 - `--turns` sets `episodeSteps` for the run.
 - Use up to `--turns 500` to simulate full-length matches.
+- Default mode pits `nearest_planet_sniper` vs itself.
+
+## Training a PPO Agent
+
+The `orbit_wars/academy/` module contains the full PPO training pipeline.
+
+### 1. Configure
+
+Edit `orbit_wars/academy/configs/default.yaml` to tune training:
+
+```yaml
+opponent: sniper          # rivals: sniper | random | self
+ppo:
+  total_updates: 500      # increase for serious training (2000+)
+  num_envs: 2
+  rollout_steps: 64
+save_dir: outputs/rl_checkpoints
+```
+
+### 2. Train
+
+```bash
+uv run python orbit_wars/academy/campaign.py
+```
+
+Checkpoints are saved to `outputs/rl_checkpoints/<run_name>/` at the interval set by `checkpoint_every`. `ckpt_last.pt` is always overwritten with the most recent update.
+
+### 3. Evaluate
+
+Pit the trained policy (player 0) against the nearest-planet sniper (player 1):
+
+```bash
+uv run python main.py --checkpoint outputs/rl_checkpoints/orbit_wars_ppo/ckpt_last.pt --turns 500
+```
+
+Pass a specific checkpoint to compare snapshots from different stages of training:
+
+```bash
+uv run python main.py --checkpoint outputs/rl_checkpoints/orbit_wars_ppo/ckpt_000200.pt --turns 500
+```
 
 ## Outputs
 
@@ -66,6 +106,24 @@ After execution, logs are written to `outputs/logs`:
 - `timing.log`
 
 Console output includes per-player final `reward` and `status`.
+
+## Project Structure
+
+```
+orbit_wars/
+  academy/        # PPO training pipeline (campaign, arena, rivals, tactician, …)
+  agents/         # Heuristic agent logic (nearest_planet_sniper)
+  army/           # Ballistics and physics helpers
+  astronomy/      # Planet/comet trajectory forecasting
+  fleets/         # Enemy fleet prediction
+  observatory/    # Logging and timing utilities
+  state/          # Observation adapters and game state models
+  strategies/     # Kaggle-compatible agent entrypoints
+rl_solution/      # Original reference notebook code (kept for reference)
+outputs/
+  rl_checkpoints/ # PPO checkpoints produced by academy training
+  logs/           # app.log, timing.log
+```
 
 ## Orbit Wars Source Reference
 
