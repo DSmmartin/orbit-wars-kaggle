@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from orbit_wars.army.ballistics import aim_angle
+from orbit_wars.army.ballistics import plan_shot
 
 from .doctrine import EnvConfig
 from .chronicle import GameState, PlanetState, parse_observation
@@ -179,7 +179,18 @@ def build_candidate_features(
         dx = tgt.x - src.x
         dy = tgt.y - src.y
         ships_needed = fixed_ship_count(src, tgt)
-        angle = aim_angle(src, tgt, ships_needed, state.step, state.angular_velocity)
+        shot = plan_shot(
+            src, tgt,
+            ships=ships_needed,
+            current_step=state.step,
+            angular_velocity=state.angular_velocity,
+            initial_to_planet=state.initial_by_id.get(tgt.id),
+            planets=state.planets,
+            initial_planets=state.initial_by_id,
+            comets=state.raw_comets or None,
+            comet_planet_ids=state.comet_planet_ids or None,
+        )
+        angle = shot.angle
         crosses_sun = shot_crosses_sun(src, angle, tgt)
         features[idx] = np.asarray(
             [
@@ -201,7 +212,7 @@ def build_candidate_features(
             dtype=np.float32,
         )
         ship_counts[idx] = ships_needed
-        candidate_mask[idx] = ships_needed > 0 and not crosses_sun and src.ships >= ships_needed
+        candidate_mask[idx] = src.ships >= ships_needed and shot.valid
         candidate_ids[idx] = tgt.id
         target_angles[idx] = angle
 

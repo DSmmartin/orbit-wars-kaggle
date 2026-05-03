@@ -46,8 +46,8 @@ class TrainConfig:
     run_name: str = "orbit_wars_ppo"
     device: str = "auto"
     save_dir: str = "outputs/rl_checkpoints"
-    checkpoint_every: int = 50
-    log_every: int = 1
+    checkpoint_every: int = 500
+    log_every: int = 100
     opponent: str = "sniper"
     """Rival to train against. Choices: sniper | random | self."""
     self_play_update_interval: int = 10
@@ -83,7 +83,9 @@ def train_config_from_dict(data: dict[str, Any]) -> TrainConfig:
     return cfg
 
 
-def _update_dataclass(instance: Any, values: dict[str, Any], skip: set[str] | None = None) -> None:
+def _update_dataclass(
+    instance: Any, values: dict[str, Any], skip: set[str] | None = None
+) -> None:
     if not isinstance(values, dict):
         return
     skip = skip or set()

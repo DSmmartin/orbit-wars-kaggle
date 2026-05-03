@@ -66,7 +66,7 @@ class _EpisodeResult:
 def _print_summary(results: list[_EpisodeResult], replays_dir: Path) -> None:
     wins_p0 = sum(1 for r in results if r.outcome == "p0")
     wins_p1 = sum(1 for r in results if r.outcome == "p1")
-    draws   = sum(1 for r in results if r.outcome == "draw")
+    draws = sum(1 for r in results if r.outcome == "draw")
 
     w = 62
     print()
@@ -78,13 +78,20 @@ def _print_summary(results: list[_EpisodeResult], replays_dir: Path) -> None:
     for r in results:
         r0 = f"{r.reward_p0}" if r.reward_p0 is not None else "—"
         r1 = f"{r.reward_p1}" if r.reward_p1 is not None else "—"
-        outcome_label = {"p0": "p0 wins", "p1": "p1 wins", "draw": "draw", "?": "?"}.get(r.outcome, "?")
+        outcome_label = {
+            "p0": "p0 wins",
+            "p1": "p1 wins",
+            "draw": "draw",
+            "?": "?",
+        }.get(r.outcome, "?")
         print(
             f"  {r.ep:<5} {r0:>10} {r1:>10}  {outcome_label:<10}"
             f"  {r.status_p0} / {r.status_p1}"
         )
     print("  " + "─" * (w - 2))
-    print(f"  wins p0={wins_p0}  wins p1={wins_p1}  draws={draws}  total={len(results)}")
+    print(
+        f"  wins p0={wins_p0}  wins p1={wins_p1}  draws={draws}  total={len(results)}"
+    )
     print("═" * w)
     print(f"  replays → {replays_dir.resolve()}")
     print("═" * w)
@@ -124,7 +131,7 @@ def main(cfg: RunConfig) -> None:
             env.run(agents)
 
         final = env.steps[-1]
-        rewards  = [s.reward for s in final]
+        rewards = [s.reward for s in final]
         statuses = [s.status for s in final]
 
         result = _EpisodeResult(
