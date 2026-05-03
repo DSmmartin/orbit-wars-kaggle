@@ -4,6 +4,7 @@ device: auto
 save_dir: outputs/rl_checkpoints
 checkpoint_every: 50
 log_every: 1
+# opponent tiers: sniper | sniper_95 | sniper_90 | sniper_80 | sniper_50
 opponent: sniper
 resume: false
 summary_freq: 5

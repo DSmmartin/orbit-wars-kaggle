@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import random
 from typing import Any, Protocol
 
 import torch
@@ -10,6 +12,14 @@ from .doctrine import TrainConfig
 from .cartography import encode_turn
 from .tactician import PlanetPolicy
 from .crucible import sample_actions
+
+SNIPER_TIERS: dict[str, float] = {
+    "sniper":    1.00,
+    "sniper_95": 0.95,
+    "sniper_90": 0.90,
+    "sniper_80": 0.80,
+    "sniper_50": 0.50,
+}
 
 
 class OpponentPolicy(Protocol):
@@ -46,6 +56,41 @@ class NearestPlanetSniperOpponent:
         state = build_game_state(observation, previous_state=None)
         decisions = choose_shot_decisions(state, config=SniperPolicyConfig())
         return build_moves(decisions)
+
+
+class TieredSniperOpponent:
+    """Sniper with configurable accuracy — misses fire a random angle.
+
+    accuracy=1.0 → perfect sniper; accuracy=0.5 → half the shots go random.
+    Intentionally stateless so a single instance is safe across parallel envs.
+    """
+
+    def __init__(self, accuracy: float) -> None:
+        self.accuracy = accuracy
+
+    def act(self, observation: Any) -> list[list[float | int]]:
+        from orbit_wars.agents.nearest_planet_sniper import (
+            ShotDecision, SniperPolicyConfig, build_moves, choose_shot_decisions,
+        )
+        from orbit_wars.state import build_game_state
+
+        state = build_game_state(observation, previous_state=None)
+        decisions = choose_shot_decisions(state, config=SniperPolicyConfig())
+
+        if self.accuracy >= 1.0:
+            return build_moves(decisions)
+
+        corrupted: list[ShotDecision] = []
+        for d in decisions:
+            if random.random() > self.accuracy:
+                d = ShotDecision(
+                    source_planet_id=d.source_planet_id,
+                    target_planet_id=d.target_planet_id,
+                    angle_rad=random.uniform(-math.pi, math.pi),
+                    ships=d.ships,
+                )
+            corrupted.append(d)
+        return build_moves(corrupted)
 
 
 class SelfPlayOpponent:
@@ -102,15 +147,16 @@ def build_opponent(
     cfg: TrainConfig | None = None,
     device: torch.device | None = None,
 ) -> OpponentPolicy:
+    if name in SNIPER_TIERS:
+        return TieredSniperOpponent(SNIPER_TIERS[name])
     if name == "random":
         return KaggleRandomOpponent()
-    if name == "sniper":
-        return NearestPlanetSniperOpponent()
     if name == "self":
         if cfg is None or device is None:
             raise ValueError("cfg and device are required for self opponent")
         return SelfPlayOpponent(cfg, device=device, deterministic=cfg.self_play_deterministic)
-    raise ValueError(f"Unknown rival: {name}")
+    valid = list(SNIPER_TIERS) + ["random", "self"]
+    raise ValueError(f"Unknown rival: {name!r}. Valid: {valid}")
 
 
 def _obs_get(observation: Any, key: str, default: Any) -> Any:
