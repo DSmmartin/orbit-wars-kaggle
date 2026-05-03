@@ -44,7 +44,7 @@ def self_feature_dim() -> int:
 
 
 def candidate_feature_dim() -> int:
-    return 14
+    return 12
 
 
 def global_feature_dim() -> int:
@@ -176,8 +176,6 @@ def build_candidate_features(
     for idx, tgt in enumerate(candidates, start=1):
         if idx >= env_cfg.candidate_count:
             break
-        dx = tgt.x - src.x
-        dy = tgt.y - src.y
         ships_needed = fixed_ship_count(src, tgt)
         shot = plan_shot(
             src, tgt,
@@ -200,9 +198,7 @@ def build_candidate_features(
                 1.0 if tgt.owner not in {-1, state.player} else 0.0,
                 tgt.x / env_cfg.board_size,
                 tgt.y / env_cfg.board_size,
-                dx / env_cfg.board_size,
-                dy / env_cfg.board_size,
-                distance(src, tgt) / env_cfg.board_size,
+                (shot.eta_steps or 0.0) / env_cfg.episode_steps,
                 min(tgt.ships, env_cfg.max_ships) / env_cfg.max_ships,
                 tgt.production / env_cfg.max_production,
                 1.0 if is_rotating_planet(tgt) else 0.0,
