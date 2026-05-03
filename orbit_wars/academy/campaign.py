@@ -4,6 +4,7 @@ import random
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import draccus
 import numpy as np
@@ -15,9 +16,9 @@ from .chronicle import PlanetState
 from .crucible import TransitionBatch, ppo_update, sample_actions
 from .doctrine import TrainConfig
 from .rivals import SelfPlayOpponent, build_opponent
-from .tactician import PlanetPolicy
+from .tactician import PlanetPolicy, PolicyOutput
 
-_VALID_OPPONENTS = {"sniper", "random", "self"}
+_VALID_OPPONENTS = {"sniper", "random", "self", "sniper_95", "sniper_90", "sniper_80", "sniper_50"}
 
 
 @dataclass(slots=True)
@@ -123,6 +124,7 @@ def _print_config_status(cfg: TrainConfig, device: torch.device, start_update: i
     print(f"  {'run_name':<18}: {cfg.run_name}")
     print(f"  {'device':<18}: {_device_label(device)}")
     print(f"  {'opponent':<18}: {cfg.opponent}")
+    print(f"  {'guided_steps':<18}: {cfg.guided_steps}  {'(disabled)' if cfg.guided_steps == 0 else '(sniper imitation early-game)'}")
     print(f"  {'total_updates':<18}: {cfg.ppo.total_updates}")
     print(f"  {'start_update':<18}: {start_update}")
     print(f"  {'num_envs':<18}: {cfg.ppo.num_envs}")
@@ -135,6 +137,29 @@ def _print_config_status(cfg: TrainConfig, device: torch.device, start_update: i
     print(f"  {'resume':<18}: {cfg.resume}")
     print(sep)
     print()
+
+
+def _sniper_target_slots(obs: Any, contexts: list) -> list[int]:
+    """Return the sniper's chosen candidate slot per context row (0 = do nothing)."""
+    from orbit_wars.agents.nearest_planet_sniper import SniperPolicyConfig, choose_shot_decisions
+    from orbit_wars.state import build_game_state
+
+    state = build_game_state(obs, previous_state=None)
+    decisions = choose_shot_decisions(state, config=SniperPolicyConfig())
+    target_by_source = {d.source_planet_id: d.target_planet_id for d in decisions}
+
+    slots: list[int] = []
+    for ctx in contexts:
+        target_id = target_by_source.get(ctx.source_id)
+        if target_id is not None:
+            try:
+                slot = ctx.candidate_ids.index(target_id)
+            except ValueError:
+                slot = 0
+        else:
+            slot = 0
+        slots.append(slot)
+    return slots
 
 
 def collect_rollout(
@@ -159,6 +184,16 @@ def collect_rollout(
 
     for _ in range(cfg.ppo.rollout_steps):
         offsets = np.cumsum([0] + [batch.self_features.shape[0] for batch in batches[:-1]])
+
+        # Compute sniper guidance slots per env for guided early-game steps.
+        guidance_per_env: list[list[int] | None] = []
+        for env_idx, env in enumerate(envs):
+            batch = batches[env_idx]
+            if cfg.guided_steps > 0 and batch.state.step < cfg.guided_steps and batch.contexts:
+                guidance_per_env.append(_sniper_target_slots(env.last_obs, batch.contexts))
+            else:
+                guidance_per_env.append(None)
+
         merged = merge_batches(batches)
         row_values = np.zeros((merged.self_features.shape[0],), dtype=np.float32)
         if merged.self_features.shape[0] > 0:
@@ -169,8 +204,34 @@ def collect_rollout(
                     torch.from_numpy(merged.global_features).to(device),
                     torch.from_numpy(merged.candidate_mask).to(device).bool(),
                 )
-                sampled = sample_actions(outputs, deterministic=False)
                 row_values = outputs.value.detach().cpu().numpy()
+
+                # Apply sniper guidance: restrict logits to only the sniper's slot.
+                # The original candidate_mask is stored in the buffer unchanged so
+                # PPO updates produce real gradients toward the guided actions.
+                sampling_outputs = outputs
+                if any(slots is not None for slots in guidance_per_env):
+                    guided_logits = outputs.target_logits.clone()
+                    for env_idx, slots in enumerate(guidance_per_env):
+                        if slots is None:
+                            continue
+                        start = int(offsets[env_idx])
+                        batch = batches[env_idx]
+                        for local_idx, sniper_slot in enumerate(slots):
+                            global_idx = start + local_idx
+                            ctx = batch.contexts[local_idx]
+                            if sniper_slot > 0 and not ctx.candidate_mask[sniper_slot]:
+                                sniper_slot = 0
+                            row = torch.full(
+                                (cfg.env.candidate_count,), float("-inf"), device=device
+                            )
+                            row[sniper_slot] = 0.0
+                            guided_logits[global_idx] = row
+                    sampling_outputs = PolicyOutput(
+                        target_logits=guided_logits, value=outputs.value
+                    )
+
+                sampled = sample_actions(sampling_outputs, deterministic=False)
                 sampled_target_index = sampled.target_index.detach().cpu().numpy()
                 sampled_log_prob = sampled.log_prob.detach().cpu().numpy()
         else:

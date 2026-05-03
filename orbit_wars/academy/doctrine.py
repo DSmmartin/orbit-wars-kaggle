@@ -32,7 +32,7 @@ class PPOConfig:
     total_updates: int = 200
     epochs: int = 4
     minibatch_size: int = 512
-    gamma: float = 0.99
+    gamma: float = 0.95
     clip_coef: float = 0.2
     ent_coef: float = 0.01
     vf_coef: float = 0.5
@@ -57,6 +57,10 @@ class TrainConfig:
     """Resume training from the last checkpoint in save_dir/run_name/."""
     summary_freq: int = 5
     """Print a training summary to console every N minutes. 0 disables it."""
+    guided_steps: int = 60
+    """For the first N game steps of each episode, restrict the action mask to the sniper's choice.
+    The policy still runs a forward pass and receives PPO gradients — it learns to imitate the sniper
+    early-game rather than exploring randomly. Set to 0 to disable."""
     env: EnvConfig = field(default_factory=EnvConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)

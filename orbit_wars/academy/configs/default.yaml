@@ -8,6 +8,7 @@ log_every: 1
 opponent: sniper
 resume: false
 summary_freq: 5
+guided_steps: 60
 self_play_update_interval: 50
 self_play_deterministic: false
 alternate_player_sides: true
